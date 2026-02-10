@@ -19,7 +19,7 @@ jobs:
     - name: Build application
       run: npm run make
     - name: Upload artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: squirtle-sql-viewer-windows
         path: out/make/squirrel.windows/x64/*.nupkg

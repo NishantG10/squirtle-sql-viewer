@@ -1,0 +1,25 @@
+name: Build Windows App
+
+on:
+  push:
+    branches: [ master ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v3
+    - name: Use Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '20'
+    - name: Install dependencies
+      run: npm install
+    - name: Build application
+      run: npm run make
+    - name: Upload artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: squirtle-sql-viewer-windows
+        path: out/make/squirrel.windows/x64/*.nupkg

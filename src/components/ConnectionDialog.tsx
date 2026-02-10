@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Button,
   Dialog,
@@ -8,6 +8,8 @@ import {
   TextField,
   CircularProgress,
   Alert,
+  FormControlLabel,
+  Checkbox,
 } from '@mui/material';
 
 interface ConnectionDialogProps {
@@ -20,12 +22,41 @@ function ConnectionDialog({ open, handleClose }: ConnectionDialogProps) {
   const [database, setDatabase] = useState('');
   const [user, setUser] = useState('');
   const [password, setPassword] = useState('');
+  const [saveCredentials, setSaveCredentials] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (open) {
+      const loadCredentials = async () => {
+        const stored = await window.electronAPI.getCredentials();
+        if (stored) {
+          setServer(stored.server || '');
+          setDatabase(stored.database || '');
+          setUser(stored.user || '');
+          // If we have stored credentials, we assume the user wants to keep saving them
+          setSaveCredentials(true);
+          // Only auto-fill password if it was saved (security implication: plaintext storage)
+          setPassword(stored.password || '');
+        }
+      };
+      loadCredentials();
+    }
+  }, [open]);
 
   const handleConnect = async () => {
     setLoading(true);
     setError('');
+    
+    // Save or Clear credentials based on checkbox
+    if (saveCredentials) {
+        await window.electronAPI.saveCredentials({ server, database, user, password });
+    } else {
+        // If unchecked, we might want to clear them, or just update without password?
+        // For now, let's clear them to respect "don't save"
+        await window.electronAPI.saveCredentials({}); 
+    }
+
     const result = await window.electronAPI.connect({
       server,
       database,
@@ -45,7 +76,7 @@ function ConnectionDialog({ open, handleClose }: ConnectionDialogProps) {
   };
 
   return (
-    <Dialog open={open} onClose={handleClose}>
+    <Dialog open={open} onClose={() => handleClose(false)}>
       <DialogTitle>Connect to SQL Server</DialogTitle>
       <DialogContent>
         {error && <Alert severity="error">{error}</Alert>}
@@ -85,6 +116,16 @@ function ConnectionDialog({ open, handleClose }: ConnectionDialogProps) {
           variant="standard"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
+        />
+        <FormControlLabel
+          control={
+            <Checkbox
+              checked={saveCredentials}
+              onChange={(e) => setSaveCredentials(e.target.checked)}
+              color="primary"
+            />
+          }
+          label="Save Credentials"
         />
       </DialogContent>
       <DialogActions>

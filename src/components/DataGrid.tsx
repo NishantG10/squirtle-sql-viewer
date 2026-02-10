@@ -1,19 +1,32 @@
 import React from 'react';
-import { DataGrid, GridColDef, GridRowsProp, GridRowModel } from '@mui/x-data-grid';
+import { DataGrid, GridColDef, GridRowsProp, GridRowModel, GridRowSelectionModel } from '@mui/x-data-grid';
 
 interface DataGridProps {
   columns: GridColDef[];
   rows: GridRowsProp;
   processRowUpdate: (newRow: GridRowModel, oldRow: GridRowModel) => Promise<GridRowModel>;
+  rowSelectionModel?: GridRowSelectionModel;
+  onRowSelectionModelChange?: (newSelectionModel: GridRowSelectionModel) => void;
 }
 
-function MyDataGrid({ columns, rows, processRowUpdate }: DataGridProps) {
+function MyDataGrid({ columns, rows, processRowUpdate, rowSelectionModel, onRowSelectionModelChange }: DataGridProps) {
+  const safeRows = Array.isArray(rows) ? rows : [];
   return (
-    <div style={{ height: 'calc(100vh - 100px)', width: '100%' }}>
+    <div style={{ height: '100%', width: '100%' }}>
       <DataGrid
-        rows={rows}
+        rows={safeRows}
         columns={columns}
         processRowUpdate={processRowUpdate}
+        checkboxSelection
+        disableRowSelectionOnClick
+        rowSelectionModel={rowSelectionModel || { type: 'include', ids: new Set() }}
+        onRowSelectionModelChange={onRowSelectionModelChange}
+        sx={{
+            border: 0,
+            '& .MuiDataGrid-cell:focus': {
+                outline: 'none'
+            }
+        }}
       />
     </div>
   );

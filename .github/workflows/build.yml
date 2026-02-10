@@ -21,5 +21,5 @@ jobs:
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: squirtle-sql-viewer-windows
-        path: out/make/squirrel.windows/x64/*.nupkg
+        name: squirtle-sql-viewer-windows-installer
+        path: out/make/squirrel.windows/x64/Setup.exe

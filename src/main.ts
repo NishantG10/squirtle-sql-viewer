@@ -50,12 +50,11 @@ const createWindow = () => {
   // and load the index.html of the app.
   if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
     mainWindow.loadURL(MAIN_WINDOW_VITE_DEV_SERVER_URL);
+    // Open the DevTools in development mode.
+    mainWindow.webContents.openDevTools();
   } else {
     mainWindow.loadFile(path.join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`));
   }
-
-  // Open the DevTools.
-  mainWindow.webContents.openDevTools();
 };
 
 ipcMain.handle('db-connect', async (event, config) => {
@@ -70,19 +69,183 @@ ipcMain.handle('db-connect', async (event, config) => {
 ipcMain.handle('db-get-tables', async () => {
   try {
     const result = await pool.request().query(`
-      SELECT TABLE_NAME
+      SELECT TABLE_SCHEMA, TABLE_NAME
       FROM INFORMATION_SCHEMA.TABLES
       WHERE TABLE_TYPE = 'BASE TABLE'
+      ORDER BY TABLE_SCHEMA, TABLE_NAME
     `);
-    return result.recordset.map((row) => row.TABLE_NAME);
+    const tables = result.recordset.map((row) => `${row.TABLE_SCHEMA}.${row.TABLE_NAME}`);
+    return tables;
   } catch (err: any) {
     return { error: err.message };
   }
 });
 
-ipcMain.handle('db-get-table-data', async (event, tableName) => {
+ipcMain.handle('db-get-table-count', async (event, tableName, filters = []) => {
   try {
-    const result = await pool.request().query(`SELECT * FROM ${tableName}`);
+    // Parse schema.table format
+    let schemaName = 'dbo';
+    let realTableName = tableName;
+    if (tableName.includes('.')) {
+        const parts = tableName.split('.');
+        schemaName = parts[0];
+        realTableName = parts[1];
+    }
+    
+    // Build WHERE clause from filters
+    let whereClause = '';
+    const request = pool.request();
+    
+    if (filters && filters.length > 0) {
+      const conditions = filters.map((filter: any, index: number) => {
+        if (filter.field && filter.value) {
+          const paramName = `filterValue${index}`;
+          
+          // Check operator type (contains or exact)
+          if (filter.operator === 'exact') {
+            request.input(paramName, filter.value);
+            return `CAST([${filter.field}] AS NVARCHAR(MAX)) = @${paramName}`;
+          } else {
+            // Default to 'contains' behavior
+            request.input(paramName, `%${filter.value}%`);
+            return `CAST([${filter.field}] AS NVARCHAR(MAX)) LIKE @${paramName}`;
+          }
+        }
+        return null;
+      }).filter(Boolean);
+      
+      if (conditions.length > 0) {
+        whereClause = 'WHERE ' + conditions.join(' AND ');
+      }
+    }
+    
+    // If we have filters, we must use COUNT(*) as sys.partitions doesn't respect WHERE
+    if (whereClause) {
+      const safeTableName = `[${schemaName}].[${realTableName}]`;
+      const countResult = await request.query(`SELECT COUNT(*) as count FROM ${safeTableName} ${whereClause}`);
+      return parseInt(countResult.recordset[0].count, 10);
+    }
+    
+    // Try fast count using sys.partitions (only when no filters)
+    const fastQuery = `
+      SELECT SUM(p.rows) as count
+      FROM sys.tables t
+      JOIN sys.schemas s ON t.schema_id = s.schema_id
+      JOIN sys.partitions p ON t.object_id = p.object_id
+      WHERE s.name = @schema
+      AND t.name = @tableName
+      AND p.index_id < 2
+    `;
+    request.input('schema', schemaName);
+    request.input('tableName', realTableName);
+    const fastResult = await request.query(fastQuery);
+
+    // If fast count returns a positive number, use it
+    if (fastResult.recordset.length > 0 && fastResult.recordset[0].count > 0) {
+         const count = parseInt(fastResult.recordset[0].count, 10);
+         return count;
+    }
+
+    // Fallback to COUNT(*)
+    const safeTableName = `[${schemaName}].[${realTableName}]`;
+    const countResult = await pool.request().query(`SELECT COUNT(*) as count FROM ${safeTableName}`);
+    return parseInt(countResult.recordset[0].count, 10);
+  } catch (err: any) {
+    console.error("Count Error for", tableName, ":", err.message);
+    return 0;
+  }
+});
+
+ipcMain.handle('db-get-table-data', async (event, tableName, page = 0, pageSize = 100, orderByColumn = null, filters = []) => {
+  try {
+    const offset = page * pageSize;
+    
+    // Parse schema.table
+    let schemaName = 'dbo';
+    let realTableName = tableName;
+    if (tableName.includes('.')) {
+        const parts = tableName.split('.');
+        schemaName = parts[0];
+        realTableName = parts[1];
+    }
+    
+    const safeTableName = `[${schemaName}].[${realTableName}]`;
+    
+    // Build WHERE clause from filters
+    let whereClause = '';
+    const request = pool.request();
+    
+    if (filters && filters.length > 0) {
+      const conditions = filters.map((filter: any, index: number) => {
+        if (filter.field && filter.value) {
+          const paramName = `filterValue${index}`;
+          
+          // Check operator type (contains or exact)
+          if (filter.operator === 'exact') {
+            request.input(paramName, filter.value);
+            return `CAST([${filter.field}] AS NVARCHAR(MAX)) = @${paramName}`;
+          } else {
+            // Default to 'contains' behavior
+            request.input(paramName, `%${filter.value}%`);
+            return `CAST([${filter.field}] AS NVARCHAR(MAX)) LIKE @${paramName}`;
+          }
+        }
+        return null;
+      }).filter(Boolean);
+      
+      if (conditions.length > 0) {
+        whereClause = 'WHERE ' + conditions.join(' AND ');
+      }
+    }
+    
+    let orderClause = 'ORDER BY (SELECT NULL)'; 
+    
+    if (orderByColumn) {
+        orderClause = `ORDER BY [${orderByColumn.replace(/\]/g, ']]')}]`;
+    } else {
+        // We need an ORDER BY clause for OFFSET/FETCH to work in SQL Server
+        // Try to find a primary key first
+        const pkResult = await pool.request()
+        .input('tableName', realTableName)
+        .input('schema', schemaName)
+        .query(`
+          SELECT COLUMN_NAME
+          FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+          WHERE OBJECTPROPERTY(OBJECT_ID(CONSTRAINT_SCHEMA + '.' + CONSTRAINT_NAME), 'IsPrimaryKey') = 1
+          AND TABLE_NAME = @tableName
+          AND TABLE_SCHEMA = @schema
+        `);
+
+        if (pkResult.recordset.length > 0) {
+            orderClause = `ORDER BY [${pkResult.recordset[0].COLUMN_NAME.replace(/\]/g, ']]')}]`;
+        } else {
+            // Fallback to first column if no PK
+            const colResult = await pool.request()
+            .input('tableName', realTableName)
+            .input('schema', schemaName)
+            .query(`
+                SELECT TOP 1 COLUMN_NAME 
+                FROM INFORMATION_SCHEMA.COLUMNS 
+                WHERE TABLE_NAME = @tableName
+                AND TABLE_SCHEMA = @schema
+                ORDER BY ORDINAL_POSITION
+            `);
+            
+            if (colResult.recordset.length > 0) {
+                orderClause = `ORDER BY [${colResult.recordset[0].COLUMN_NAME.replace(/\]/g, ']]')}]`;
+            }
+        }
+    }
+
+    const query = `
+      SELECT * FROM ${safeTableName}
+      ${whereClause}
+      ${orderClause}
+      OFFSET ${offset} ROWS
+      FETCH NEXT ${pageSize} ROWS ONLY
+    `;
+    
+    const result = await request.query(query);
     return result.recordset;
   } catch (err: any) {
     return { error: err.message };
@@ -91,14 +254,24 @@ ipcMain.handle('db-get-table-data', async (event, tableName) => {
 
 ipcMain.handle('db-get-primary-key', async (event, tableName) => {
   try {
+    let schemaName = 'dbo';
+    let realTableName = tableName;
+    if (tableName.includes('.')) {
+        const parts = tableName.split('.');
+        schemaName = parts[0];
+        realTableName = parts[1];
+    }
+
     const query = `
       SELECT COLUMN_NAME
       FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
       WHERE OBJECTPROPERTY(OBJECT_ID(CONSTRAINT_SCHEMA + '.' + CONSTRAINT_NAME), 'IsPrimaryKey') = 1
       AND TABLE_NAME = @tableName
+      AND TABLE_SCHEMA = @schema
     `;
     const request = pool.request();
-    request.input('tableName', tableName);
+    request.input('tableName', realTableName);
+    request.input('schema', schemaName);
     const result = await request.query(query);
     
     if (result.recordset.length > 0) {
@@ -116,6 +289,16 @@ ipcMain.handle('db-update-table-data', async (event, tableName, row, primaryKeyC
     const request = pool.request();
     const setClauses: string[] = [];
     const whereClauses: string[] = [];
+
+    // Parse schema.table for safe quoting
+    let schemaName = 'dbo';
+    let realTableName = tableName;
+    if (tableName.includes('.')) {
+        const parts = tableName.split('.');
+        schemaName = parts[0];
+        realTableName = parts[1];
+    }
+    const safeTableName = `[${schemaName}].[${realTableName}]`;
 
     // If no primary key is provided or found, we can't safely update
     if (!primaryKeyColumns || primaryKeyColumns.length === 0) {
@@ -152,7 +335,7 @@ ipcMain.handle('db-update-table-data', async (event, tableName, row, primaryKeyC
          return { success: true }; // Nothing to update
     }
 
-    const query = `UPDATE ${tableName} SET ${setClauses.join(', ')} WHERE ${whereClauses.join(' AND ')}`;
+    const query = `UPDATE ${safeTableName} SET ${setClauses.join(', ')} WHERE ${whereClauses.join(' AND ')}`;
     
     await request.query(query);
     return { success: true };
@@ -166,6 +349,16 @@ ipcMain.handle('db-delete-table-rows', async (event, tableName, rowPks, primaryK
   try {
     const request = pool.request();
     
+    // Parse schema.table for safe quoting
+    let schemaName = 'dbo';
+    let realTableName = tableName;
+    if (tableName.includes('.')) {
+        const parts = tableName.split('.');
+        schemaName = parts[0];
+        realTableName = parts[1];
+    }
+    const safeTableName = `[${schemaName}].[${realTableName}]`;
+
     if (!primaryKeyColumns || primaryKeyColumns.length === 0) {
         throw new Error("No Primary Key identified. Cannot delete rows safely.");
     }
@@ -184,7 +377,7 @@ ipcMain.handle('db-delete-table-rows', async (event, tableName, rowPks, primaryK
              whereClauses.push(`${pkCol} = @${paramName}`);
         });
         
-        const query = `DELETE FROM ${tableName} WHERE ${whereClauses.join(' AND ')}`;
+        const query = `DELETE FROM ${safeTableName} WHERE ${whereClauses.join(' AND ')}`;
         await request.query(query);
     }
 
@@ -197,6 +390,14 @@ ipcMain.handle('db-delete-table-rows', async (event, tableName, rowPks, primaryK
 
 ipcMain.handle('db-get-columns', async (event, tableName) => {
   try {
+    let schemaName = 'dbo';
+    let realTableName = tableName;
+    if (tableName.includes('.')) {
+        const parts = tableName.split('.');
+        schemaName = parts[0];
+        realTableName = parts[1];
+    }
+  
     const query = `
       SELECT 
         c.COLUMN_NAME, 
@@ -205,9 +406,11 @@ ipcMain.handle('db-get-columns', async (event, tableName) => {
         COLUMNPROPERTY(OBJECT_ID(c.TABLE_SCHEMA + '.' + c.TABLE_NAME), c.COLUMN_NAME, 'IsIdentity') AS IS_IDENTITY
       FROM INFORMATION_SCHEMA.COLUMNS c
       WHERE c.TABLE_NAME = @tableName
+      AND c.TABLE_SCHEMA = @schema
     `;
     const request = pool.request();
-    request.input('tableName', tableName);
+    request.input('tableName', realTableName);
+    request.input('schema', schemaName);
     const result = await request.query(query);
     return result.recordset;
   } catch (err: any) {
@@ -218,6 +421,16 @@ ipcMain.handle('db-get-columns', async (event, tableName) => {
 ipcMain.handle('db-insert-table-row', async (event, tableName, row, validColumnNames) => {
     try {
         const request = pool.request();
+        
+        let schemaName = 'dbo';
+        let realTableName = tableName;
+        if (tableName.includes('.')) {
+            const parts = tableName.split('.');
+            schemaName = parts[0];
+            realTableName = parts[1];
+        }
+        const safeTableName = `[${schemaName}].[${realTableName}]`;
+
         // If validColumnNames is provided, intersection. Else heuristic.
         let columnsToInsert = Object.keys(row).filter(key => key !== 'id' && key !== '_originalPks' && key !== '_isNew');
         
@@ -230,9 +443,64 @@ ipcMain.handle('db-insert-table-row', async (event, tableName, row, validColumnN
         const valParams = columnsToInsert.map(col => `@${col}`);
         columnsToInsert.forEach(col => request.input(col, row[col]));
 
-        const query = `INSERT INTO ${tableName} (${columnsToInsert.join(', ')}) VALUES (${valParams.join(', ')})`;
+        const query = `INSERT INTO ${safeTableName} (${columnsToInsert.join(', ')}) VALUES (${valParams.join(', ')})`;
         await request.query(query);
         return { success: true };
+    } catch (err: any) {
+        return { success: false, error: err.message };
+    }
+});
+
+ipcMain.handle('db-bulk-insert', async (event, tableName, rows, columnNames) => {
+    try {
+        let schemaName = 'dbo';
+        let realTableName = tableName;
+        if (tableName.includes('.')) {
+            const parts = tableName.split('.');
+            schemaName = parts[0];
+            realTableName = parts[1];
+        }
+        const safeTableName = `[${schemaName}].[${realTableName}]`;
+
+        let successCount = 0;
+        let failCount = 0;
+        const errors: string[] = [];
+
+        // Insert rows one by one (could be optimized with batch inserts)
+        for (let i = 0; i < rows.length; i++) {
+            try {
+                const request = pool.request();
+                const row = rows[i];
+                
+                // Filter to only valid columns
+                const columnsToInsert = columnNames.filter((col: string) => 
+                    row[col] !== undefined && row[col] !== null && row[col] !== ''
+                );
+
+                if (columnsToInsert.length === 0) {
+                    failCount++;
+                    errors.push(`Row ${i + 1}: No valid data`);
+                    continue;
+                }
+
+                const valParams = columnsToInsert.map((col: string) => `@${col}`);
+                columnsToInsert.forEach((col: string) => request.input(col, row[col]));
+
+                const query = `INSERT INTO ${safeTableName} (${columnsToInsert.map((c: string) => `[${c}]`).join(', ')}) VALUES (${valParams.join(', ')})`;
+                await request.query(query);
+                successCount++;
+            } catch (err: any) {
+                failCount++;
+                errors.push(`Row ${i + 2}: ${err.message}`); // +2 because we skip header row
+            }
+        }
+
+        return { 
+            success: true, 
+            successCount, 
+            failCount,
+            errors: errors.slice(0, 10) // Return first 10 errors only
+        };
     } catch (err: any) {
         return { success: false, error: err.message };
     }

@@ -5,7 +5,8 @@ declare global {
     electronAPI: {
       connect: (config: any) => Promise<any>;
       getTables: () => Promise<string[]>;
-      getTableData: (tableName: string) => Promise<any[]>;
+      getTableData: (tableName: string, page: number, pageSize: number, orderByColumn?: string) => Promise<any[]>;
+      getTableCount: (tableName: string) => Promise<number>;
       getPrimaryKey: (tableName: string) => Promise<string[]>;
       updateTableData: (tableName: string, data: any, primaryKeyColumns: string[], originalPkValues?: any) => Promise<any>;
       getCredentials: () => Promise<any>;

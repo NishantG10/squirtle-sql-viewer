@@ -1,14 +1,26 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Button, Container, CssBaseline, Paper, Box, Snackbar, Alert, Backdrop, CircularProgress, ThemeProvider, Typography } from '@mui/material';
+import { Button, Container, CssBaseline, Paper, Box, Snackbar, Alert, Backdrop, CircularProgress, ThemeProvider, Typography, IconButton, TextField, MenuItem, Chip, Stack } from '@mui/material';
 import ConnectionDialog from './components/ConnectionDialog';
 import Sidebar from './components/Sidebar';
 import MyDataGrid from './components/DataGrid';
+import AddRowDialog from './components/AddRowDialog';
+import ImportDialog from './components/ImportDialog';
 import { GridColDef, GridRowModel, GridRowSelectionModel } from '@mui/x-data-grid';
 import { lightTheme, darkTheme } from './theme';
 import AddIcon from '@mui/icons-material/Add';
 import DeleteIcon from '@mui/icons-material/Delete';
 import SaveIcon from '@mui/icons-material/Save';
 import UndoIcon from '@mui/icons-material/Undo';
+import FilterListIcon from '@mui/icons-material/FilterList';
+import CloseIcon from '@mui/icons-material/Close';
+import UploadFileIcon from '@mui/icons-material/UploadFile';
+
+interface FilterRule {
+  id: string;
+  field: string;
+  value: string;
+  operator: 'contains' | 'exact';
+}
 
 function App() {
   const [mode, setMode] = useState<'light' | 'dark'>('dark');
@@ -30,6 +42,51 @@ function App() {
   const [snackbarSeverity, setSnackbarSeverity] = useState<'success' | 'error' | 'warning' | 'info'>('success');
   const [deletedRowsOriginalPks, setDeletedRowsOriginalPks] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
+  const [showFilterPanel, setShowFilterPanel] = useState(false);
+  const [filters, setFilters] = useState<FilterRule[]>([]);
+  const [paginationModel, setPaginationModel] = useState({ page: 0, pageSize: 25 });
+  const [rowCount, setRowCount] = useState(0);
+  const [addRowDialogOpen, setAddRowDialogOpen] = useState(false);
+  const [importDialogOpen, setImportDialogOpen] = useState(false);
+
+  const filteredRows = useMemo(() => {
+    // No longer needed for client-side filtering since we use server-side
+    return rows;
+  }, [rows]);
+
+  const handleAddFilter = () => {
+    if (columns.length > 0) {
+      setFilters(prev => [...prev, { id: Date.now().toString(), field: columns[0].field, value: '', operator: 'contains' }]);
+    }
+  };
+
+  const handleRemoveFilter = (id: string) => {
+    setFilters(prev => prev.filter(f => f.id !== id));
+  };
+
+  const handleFilterChange = (id: string, field: keyof FilterRule, value: string) => {
+    setFilters(prev => prev.map(f => f.id === id ? { ...f, [field]: value } : f));
+  };
+
+  // Re-fetch data when filters change
+  React.useEffect(() => {
+    if (selectedTable && connected) {
+      const applyFilters = async () => {
+        setLoading(true);
+        setPaginationModel(prev => ({ ...prev, page: 0 })); // Reset to first page
+        
+        // Re-fetch count with filters
+        const countResult = await window.electronAPI.getTableCount(selectedTable, filters);
+        setRowCount(typeof countResult === 'number' ? countResult : 0);
+        
+        // Re-fetch data with filters
+        await fetchTableData(selectedTable, 0, paginationModel.pageSize, primaryKeys);
+        setLoading(false);
+      };
+      
+      applyFilters();
+    }
+  }, [filters]);
 
   const handleOpen = () => {
     setOpen(true);
@@ -49,6 +106,33 @@ function App() {
     setSnackbarOpen(false);
   };
 
+  const fetchTableData = async (table: string, page: number, pageSize: number, pks: string[]) => {
+      try {
+        const dataResult = await window.electronAPI.getTableData(table, page, pageSize, pks && pks.length > 0 ? pks[0] : undefined, filters);
+        if (Array.isArray(dataResult)) {
+            const newRows = dataResult.map((row, index) => {
+                let rowId: string | number = index;
+                const originalPks: any = {};
+    
+                if (pks.length > 0) {
+                    const pkValues = pks.map(pk => row[pk]);
+                    if (pkValues.every(val => val !== undefined && val !== null)) {
+                        rowId = pkValues.join('|||');
+                    }
+                    pks.forEach(pk => {
+                        originalPks[pk] = row[pk];
+                    });
+                }
+                return { ...row, id: rowId, _originalPks: originalPks };
+            });
+            setRows(newRows);
+            setOriginalRows(newRows);
+        }
+      } catch (e) {
+          console.error("Error fetching page", e);
+      }
+  };
+
   const handleTableSelect = async (table: string) => {
     setSelectedTable(table);
     setModifiedRows({}); 
@@ -56,15 +140,24 @@ function App() {
     setRowSelectionModel({ type: 'include', ids: new Set() });
     setPrimaryKeys([]);
     setLoading(true);
+    setFilters([]);
+    
+    // Reset pagination state without triggering immediate effect (if we block it)
+    // Or just set it, and rely on the metadata load.
+    const initialPage = 0;
+    const initialPageSize = 25;
+    setPaginationModel({ page: initialPage, pageSize: initialPageSize }); 
     
     try {
-      // Fetch Table Data, Columns, and Primary Keys in parallel
-      const [dataResult, columnResult, pkResult] = await Promise.all([
-        window.electronAPI.getTableData(table),
+      // Fetch Metadata & Count First
+      const [columnResult, pkResult, countResult] = await Promise.all([
         window.electronAPI.getColumns(table),
-        window.electronAPI.getPrimaryKey(table)
+        window.electronAPI.getPrimaryKey(table),
+        window.electronAPI.getTableCount(table, filters)
       ]);
       
+      const finalCount = typeof countResult === 'number' ? countResult : 0;
+      setRowCount(finalCount);
       const pks = Array.isArray(pkResult) ? pkResult : [];
       setPrimaryKeys(pks);
 
@@ -74,47 +167,31 @@ function App() {
             field: col.COLUMN_NAME,
             headerName: col.COLUMN_NAME,
             width: 150,
-            editable: !col.IS_IDENTITY, // Disable editing for Identity columns
+            editable: !col.IS_IDENTITY, 
          }));
          setColumns(newColumns);
       } else {
          setColumns([]);
       }
+      
+      // Now fetch initial data
+      await fetchTableData(table, initialPage, initialPageSize, pks);
 
-      // Configure Rows
-      if (Array.isArray(dataResult)) {
-          // Generate IDs: If PK exists (single or composite), use it. Else fallback to index.
-          const newRows = dataResult.map((row, index) => {
-             let rowId: string | number = index;
-             const originalPks: any = {};
-
-             if (pks.length > 0) {
-                 // Create a synthetic ID like "val1|||val2"
-                 const pkValues = pks.map(pk => row[pk]);
-                 // Check if all PK values are present (not undefined)
-                 if (pkValues.every(val => val !== undefined && val !== null)) {
-                     rowId = pkValues.join('|||');
-                 }
-                 // Store original PK values
-                 pks.forEach(pk => {
-                    originalPks[pk] = row[pk];
-                 });
-             }
-             return { ...row, id: rowId, _originalPks: originalPks };
-          });
-          
-          setRows(newRows);
-          setOriginalRows(newRows);
-      } else {
-        console.error('Error fetching table data:', (dataResult as any)?.error);
-        setRows([]);
-        setOriginalRows([]);
-      }
     } catch (e) {
       console.error("Error loading table details", e);
     } finally {
       setLoading(false);
     }
+  };
+  
+  // Replaces the useEffect added previously
+  const handlePaginationModelChange = async (model: { page: number; pageSize: number }) => {
+      setPaginationModel(model);
+      if (selectedTable) {
+          setLoading(true);
+          await fetchTableData(selectedTable, model.page, model.pageSize, primaryKeys);
+          setLoading(false);
+      }
   };
 
   const handleProcessRowUpdate = async (newRow: GridRowModel, oldRow: GridRowModel): Promise<GridRowModel> => {
@@ -217,17 +294,100 @@ function App() {
 
   const handleAddRow = () => {
     if (!selectedTable || columns.length === 0) return;
-    
+    setAddRowDialogOpen(true);
+  };
+
+  const handleAddRowFromDialog = (rowData: any) => {
     const tempId = `temp-${Date.now()}`;
-    const newRow: any = { id: tempId, _isNew: true };
-    
-    columns.forEach((col) => {
-        newRow[col.field] = null;
-    });
+    const newRow: any = { 
+      id: tempId, 
+      _isNew: true,
+      ...rowData
+    };
     
     setRows((prev) => [newRow, ...prev]);
     setModifiedRows((prev) => ({ ...prev, [tempId]: newRow }));
-  };  useEffect(() => {
+  };
+
+  const handleImport = async (file: File) => {
+    if (!selectedTable) {
+      setSnackbarMessage('No table selected');
+      setSnackbarSeverity('error');
+      setSnackbarOpen(true);
+      return;
+    }
+
+    try {
+      setLoading(true);
+
+      // Read the file
+      const buffer = await file.arrayBuffer();
+      
+      // Import xlsx dynamically
+      const XLSX = await import('xlsx');
+      
+      // Parse the file
+      const workbook = XLSX.read(buffer, { type: 'buffer' });
+      const firstSheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[firstSheetName];
+      
+      // Convert to JSON, skipping the first row (headers)
+      const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as any[][];
+      
+      if (jsonData.length < 2) {
+        setSnackbarMessage('File must contain at least one data row (excluding headers)');
+        setSnackbarSeverity('error');
+        setSnackbarOpen(true);
+        setLoading(false);
+        return;
+      }
+
+      // Skip first row (headers) and get data rows
+      const dataRows = jsonData.slice(1);
+      
+      // Get column names from the table (excluding computed/identity columns)
+      const tableColumns = columns
+        .filter(col => col.editable !== false)
+        .map(col => col.field);
+
+      // Convert array rows to objects with column names
+      const rowObjects = dataRows.map(row => {
+        const obj: any = {};
+        tableColumns.forEach((colName, index) => {
+          obj[colName] = row[index] !== undefined ? row[index] : null;
+        });
+        return obj;
+      });
+
+      // Call bulk insert
+      const result = await window.electronAPI.bulkInsert(selectedTable, rowObjects, tableColumns);
+
+      if (result.success) {
+        setSnackbarMessage(`Import completed: ${result.successCount} rows imported successfully${result.failCount > 0 ? `, ${result.failCount} failed` : ''}`);
+        setSnackbarSeverity(result.failCount > 0 ? 'warning' : 'success');
+        
+        // Refresh the table data
+        const newCount = await window.electronAPI.getTableCount(selectedTable, filters);
+        setRowCount(typeof newCount === 'number' ? newCount : 0);
+        await fetchTableData(selectedTable, paginationModel.page, paginationModel.pageSize, primaryKeys);
+      } else {
+        setSnackbarMessage(`Import failed: ${result.error || 'Unknown error'}`);
+        setSnackbarSeverity('error');
+      }
+      
+      setSnackbarOpen(true);
+      setLoading(false);
+      setImportDialogOpen(false);
+    } catch (error: any) {
+      console.error('Import error:', error);
+      setSnackbarMessage(`Import failed: ${error.message || 'Unknown error'}`);
+      setSnackbarSeverity('error');
+      setSnackbarOpen(true);
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
     if (connected) {
       const fetchTables = async () => {
         const result = await window.electronAPI.getTables();
@@ -240,6 +400,11 @@ function App() {
       fetchTables();
     }
   }, [connected]);
+
+  // Effect to handle pagination changes - removed as it conflicts with handlePaginationModelChange
+  useEffect(() => {
+     // Intentionally left empty to remove previous effect logic if any
+  }, []);
 
   return (
     <ThemeProvider theme={theme}>
@@ -319,6 +484,22 @@ function App() {
                         </Button>
                         <Button
                           variant="outlined"
+                          color="primary"
+                          startIcon={<UploadFileIcon />}
+                          onClick={() => setImportDialogOpen(true)}
+                        >
+                          Import
+                        </Button>
+                        <Button
+                            variant={showFilterPanel ? "contained" : "outlined"}
+                            color="info"
+                            startIcon={<FilterListIcon />}
+                            onClick={() => setShowFilterPanel(!showFilterPanel)}
+                        >
+                            Filter
+                        </Button>
+                        <Button
+                          variant="outlined"
                           color="error"
                           startIcon={<DeleteIcon />}
                           onClick={handleDeleteSelected}
@@ -346,6 +527,69 @@ function App() {
                         </Button>
                     </Box>
                   </Box>
+
+                  {showFilterPanel && (
+                    <Paper 
+                      elevation={0} 
+                      sx={{ 
+                        mx: 3, 
+                        mb: 2, 
+                        p: 2, 
+                        bgcolor: 'background.paper', 
+                        borderRadius: 3,
+                        border: theme.palette.mode === 'dark' ? '1px solid rgba(255,255,255,0.05)' : '1px solid rgba(0,0,0,0.05)'
+                      }}
+                    >
+                      <Box display="flex" alignItems="center" justifyContent="space-between" mb={2}>
+                        <Typography variant="subtitle2" fontWeight="600">Active Filters</Typography>
+                        <Button size="small" startIcon={<AddIcon />} onClick={handleAddFilter}>Add Filter</Button>
+                      </Box>
+                      <Stack spacing={2}>
+                        {filters.length === 0 ? (
+                           <Typography variant="body2" color="text.secondary" fontStyle="italic">No filters active. Click "Add Filter" to create one.</Typography>
+                        ) : (
+                          filters.map((filter) => (
+                            <Box key={filter.id} display="flex" gap={2} alignItems="center">
+                              <TextField
+                                select
+                                size="small"
+                                label="Column"
+                                value={filter.field}
+                                onChange={(e) => handleFilterChange(filter.id, 'field', e.target.value)}
+                                sx={{ minWidth: 150 }}
+                              >
+                                {columns.map((col) => (
+                                  <MenuItem key={col.field} value={col.field}>{col.headerName || col.field}</MenuItem>
+                                ))}
+                              </TextField>
+                              <TextField
+                                select
+                                size="small"
+                                label="Operator"
+                                value={filter.operator}
+                                onChange={(e) => handleFilterChange(filter.id, 'operator', e.target.value)}
+                                sx={{ minWidth: 120 }}
+                              >
+                                <MenuItem value="contains">Contains</MenuItem>
+                                <MenuItem value="exact">Exact Match</MenuItem>
+                              </TextField>
+                              <TextField
+                                size="small"
+                                label="Value"
+                                value={filter.value}
+                                onChange={(e) => handleFilterChange(filter.id, 'value', e.target.value)}
+                                fullWidth
+                              />
+                               <IconButton size="small" color="error" onClick={() => handleRemoveFilter(filter.id)}>
+                                 <CloseIcon />
+                               </IconButton>
+                            </Box>
+                          ))
+                        )}
+                      </Stack>
+                    </Paper>
+                  )}
+
                   <Paper 
                     elevation={0} 
                     sx={{ 
@@ -364,6 +608,9 @@ function App() {
                             processRowUpdate={handleProcessRowUpdate}
                             rowSelectionModel={rowSelectionModel}
                             onRowSelectionModelChange={(newSelection) => setRowSelectionModel(newSelection)}
+                            rowCount={rowCount}
+                            paginationModel={paginationModel}
+                            onPaginationModelChange={handlePaginationModelChange}
                         />
                   </Paper>
                 </>
@@ -388,6 +635,18 @@ function App() {
       >
         <CircularProgress color="inherit" />
       </Backdrop>
+      <AddRowDialog
+        open={addRowDialogOpen}
+        onClose={() => setAddRowDialogOpen(false)}
+        onAdd={handleAddRowFromDialog}
+        columns={columns}
+      />
+      <ImportDialog
+        open={importDialogOpen}
+        onClose={() => setImportDialogOpen(false)}
+        onImport={handleImport}
+        tableName={selectedTable || ''}
+      />
     </ThemeProvider>
   );
 }

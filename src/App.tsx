@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Button, Container, CssBaseline, Paper, Box, Snackbar, Alert, Backdrop, CircularProgress, ThemeProvider, Typography, IconButton, TextField, MenuItem, Chip, Stack } from '@mui/material';
+import { Button, Container, CssBaseline, Paper, Box, Snackbar, Alert, Backdrop, ThemeProvider, Typography, IconButton, TextField, MenuItem, Chip, Stack } from '@mui/material';
 import ConnectionDialog from './components/ConnectionDialog';
 import Sidebar from './components/Sidebar';
 import MyDataGrid from './components/DataGrid';
 import AddRowDialog from './components/AddRowDialog';
 import ImportDialog from './components/ImportDialog';
+import CatLoader from './components/CatLoader';
 import { GridColDef, GridRowModel, GridRowSelectionModel } from '@mui/x-data-grid';
 import { lightTheme, darkTheme } from './theme';
 import AddIcon from '@mui/icons-material/Add';
@@ -633,7 +634,7 @@ function App() {
         sx={{ color: '#fff', zIndex: (theme) => theme.zIndex.drawer + 1 }}
         open={loading}
       >
-        <CircularProgress color="inherit" />
+        <CatLoader size={150} />
       </Backdrop>
       <AddRowDialog
         open={addRowDialogOpen}

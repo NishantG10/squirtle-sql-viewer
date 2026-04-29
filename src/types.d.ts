@@ -33,7 +33,7 @@ declare global {
       getTableData: (tableName: string, page: number, pageSize: number, orderByColumn?: string) => Promise<any[]>;
       getTableCount: (tableName: string) => Promise<number>;
       getPrimaryKey: (tableName: string) => Promise<string[]>;
-      updateTableData: (tableName: string, data: any, primaryKeyColumns: string[], originalPkValues?: any) => Promise<any>;
+      updateTableData: (tableName: string, data: any, primaryKeyColumns: string[], originalPkValues?: any, oldRowData?: any) => Promise<any>;
       getCredentials: () => Promise<any>;
       saveCredentials: (credentials: any) => Promise<any>;
       deleteTableRows: (tableName: string, rowPks: any[], primaryKeyColumns: string[]) => Promise<any>;

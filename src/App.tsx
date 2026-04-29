@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Button, Container, CssBaseline, Paper, Box, Snackbar, Alert, Backdrop, ThemeProvider, Typography, IconButton, TextField, MenuItem, Chip, Stack } from '@mui/material';
+import { Button, Container, CssBaseline, Paper, Box, Snackbar, Alert, Backdrop, ThemeProvider, Typography, IconButton, TextField, MenuItem, Chip, Stack, Dialog, DialogTitle, DialogContent, DialogActions } from '@mui/material';
 import ConnectionDialog from './components/ConnectionDialog';
 import Sidebar from './components/Sidebar';
 import MyDataGrid from './components/DataGrid';
@@ -23,6 +23,11 @@ interface FilterRule {
   operator: 'contains' | 'exact';
 }
 
+interface ModifiedRowEntry {
+  newRow: GridRowModel;
+  oldRow?: GridRowModel;
+}
+
 function App() {
   const [mode, setMode] = useState<'light' | 'dark'>('dark');
   const theme = useMemo(() => (mode === 'light' ? lightTheme : darkTheme), [mode]);
@@ -36,7 +41,7 @@ function App() {
   const [rows, setRows] = useState<any[]>([]);
   const [originalRows, setOriginalRows] = useState<any[]>([]);
   const [columns, setColumns] = useState<GridColDef[]>([]);
-  const [modifiedRows, setModifiedRows] = useState<Record<string, GridRowModel>>({});
+  const [modifiedRows, setModifiedRows] = useState<Record<string, ModifiedRowEntry>>({});
   const [rowSelectionModel, setRowSelectionModel] = useState<GridRowSelectionModel>({ type: 'include', ids: new Set() });
   const [snackbarOpen, setSnackbarOpen] = useState(false);
   const [snackbarMessage, setSnackbarMessage] = useState('');
@@ -49,6 +54,8 @@ function App() {
   const [rowCount, setRowCount] = useState(0);
   const [addRowDialogOpen, setAddRowDialogOpen] = useState(false);
   const [importDialogOpen, setImportDialogOpen] = useState(false);
+  const [importErrorLog, setImportErrorLog] = useState<string[]>([]);
+  const [importErrorDialogOpen, setImportErrorDialogOpen] = useState(false);
 
   const filteredRows = useMemo(() => {
     // No longer needed for client-side filtering since we use server-side
@@ -208,7 +215,7 @@ function App() {
       if (oldRow.id !== newRow.id && next[oldRow.id]) {
           delete next[oldRow.id];
       }
-      next[newRow.id] = newRow;
+      next[newRow.id] = { newRow, oldRow };
       return next;
     });
 
@@ -261,11 +268,12 @@ function App() {
 
         // 2. Process Updates & Inserts
         const validColumnNames = columns.map(c => c.field);
-        const promises = Object.values(modifiedRows).map((row) => {
-            if ((row as any)._isNew) {
-                return window.electronAPI.insertTableRow(selectedTable, row, validColumnNames);
+        const promises = Object.values(modifiedRows).map((entry) => {
+          const row = entry.newRow;
+          if ((row as any)._isNew) {
+            return window.electronAPI.insertTableRow(selectedTable, row, validColumnNames);
             } else {
-                return window.electronAPI.updateTableData(selectedTable, row, primaryKeys, (row as any)._originalPks);
+            return window.electronAPI.updateTableData(selectedTable, row, primaryKeys, (row as any)._originalPks, entry.oldRow);
             }
         });
 
@@ -277,12 +285,19 @@ function App() {
             setSnackbarMessage(`Saved with errors. Failed to save ${failedUpdates.length} rows.`);
             setSnackbarSeverity('warning');
         } else {
-            // Success! Refresh table to get new IDs/Defaults
-            await handleTableSelect(selectedTable);
-            
             setSnackbarMessage('Changes (updates, deletions, inserts) saved successfully!');
             setSnackbarSeverity('success');
         }
+
+        // Always refresh table data after save to stay in sync with DB
+        const newCount = await window.electronAPI.getTableCount(selectedTable, filters);
+        setRowCount(typeof newCount === 'number' ? newCount : 0);
+        await fetchTableData(selectedTable, paginationModel.page, paginationModel.pageSize, primaryKeys);
+        
+        // Clear modification tracking
+        setModifiedRows({});
+        setDeletedRowsOriginalPks([]);
+        setRowSelectionModel({ type: 'include', ids: new Set() });
     } catch (error: any) {
       console.error('Error saving changes:', error);
       setSnackbarMessage(`Error saving changes: ${error.message}`);
@@ -307,7 +322,7 @@ function App() {
     };
     
     setRows((prev) => [newRow, ...prev]);
-    setModifiedRows((prev) => ({ ...prev, [tempId]: newRow }));
+    setModifiedRows((prev) => ({ ...prev, [tempId]: { newRow } }));
   };
 
   const handleImport = async (file: File) => {
@@ -327,13 +342,13 @@ function App() {
       // Import xlsx dynamically
       const XLSX = await import('xlsx');
       
-      // Parse the file
-      const workbook = XLSX.read(buffer, { type: 'buffer' });
+      // Parse the file - cellDates:false and raw:true to keep dates as original strings
+      const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: false, raw: true });
       const firstSheetName = workbook.SheetNames[0];
       const worksheet = workbook.Sheets[firstSheetName];
       
-      // Convert to JSON, skipping the first row (headers)
-      const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as any[][];
+      // Convert to JSON, keeping raw strings
+      const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, raw: true, rawNumbers: false }) as any[][];
       
       if (jsonData.length < 2) {
         setSnackbarMessage('File must contain at least one data row (excluding headers)');
@@ -367,6 +382,12 @@ function App() {
         setSnackbarMessage(`Import completed: ${result.successCount} rows imported successfully${result.failCount > 0 ? `, ${result.failCount} failed` : ''}`);
         setSnackbarSeverity(result.failCount > 0 ? 'warning' : 'success');
         
+        // Store error log if there are failures
+        if (result.failCount > 0 && result.errors && result.errors.length > 0) {
+          setImportErrorLog(result.errors);
+          setImportErrorDialogOpen(true);
+        }
+
         // Refresh the table data
         const newCount = await window.electronAPI.getTableCount(selectedTable, filters);
         setRowCount(typeof newCount === 'number' ? newCount : 0);
@@ -648,6 +669,69 @@ function App() {
         onImport={handleImport}
         tableName={selectedTable || ''}
       />
+      {/* Import Error Log Dialog */}
+      <Dialog
+        open={importErrorDialogOpen}
+        onClose={() => setImportErrorDialogOpen(false)}
+        maxWidth="md"
+        fullWidth
+      >
+        <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          Import Error Log ({importErrorLog.length} errors)
+          <IconButton onClick={() => setImportErrorDialogOpen(false)} size="small">
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent dividers>
+          <Box
+            sx={{
+              fontFamily: 'monospace',
+              fontSize: '13px',
+              maxHeight: '400px',
+              overflowY: 'auto',
+              backgroundColor: theme.palette.mode === 'dark' ? '#1e1e1e' : '#f5f5f5',
+              borderRadius: 1,
+              p: 2,
+            }}
+          >
+            {importErrorLog.map((err, idx) => (
+              <Box
+                key={idx}
+                sx={{
+                  py: 0.5,
+                  borderBottom: '1px solid',
+                  borderColor: 'divider',
+                  color: 'error.main',
+                  '&:last-child': { borderBottom: 'none' },
+                }}
+              >
+                {err}
+              </Box>
+            ))}
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => {
+              const logContent = importErrorLog.join('\n');
+              const blob = new Blob([logContent], { type: 'text/plain' });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = `import-errors-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.log`;
+              a.click();
+              URL.revokeObjectURL(url);
+            }}
+            variant="outlined"
+            color="error"
+          >
+            Download Error Log
+          </Button>
+          <Button onClick={() => setImportErrorDialogOpen(false)} variant="contained">
+            Close
+          </Button>
+        </DialogActions>
+      </Dialog>
     </ThemeProvider>
   );
 }

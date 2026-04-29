@@ -10,7 +10,7 @@ declare global {
       getTableData: (tableName: string, page?: number, pageSize?: number, orderByColumn?: string, filters?: any[]) => Promise<any[]>;
       getPrimaryKey: (tableName: string) => Promise<string[]>;
       getTableCount: (tableName: string, filters?: any[]) => Promise<number>;
-      updateTableData: (tableName: string, data: any, primaryKeyColumns: string[], originalPkValues?: any) => Promise<any>;
+      updateTableData: (tableName: string, data: any, primaryKeyColumns: string[], originalPkValues?: any, oldRowData?: any) => Promise<any>;
       getCredentials: () => Promise<any>;
       saveCredentials: (credentials: any) => Promise<any>;
       deleteTableRows: (tableName: string, rowPks: any[], primaryKeyColumns: string[]) => Promise<any>;
@@ -27,7 +27,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getTableData: (tableName: string, page: number, pageSize: number, orderByColumn: string, filters: any[]) => ipcRenderer.invoke('db-get-table-data', tableName, page, pageSize, orderByColumn, filters),
   getTableCount: (tableName: string, filters: any[]) => ipcRenderer.invoke('db-get-table-count', tableName, filters),
   getPrimaryKey: (tableName: string) => ipcRenderer.invoke('db-get-primary-key', tableName),
-  updateTableData: (tableName: string, data: any, primaryKeyColumns: string[], originalPkValues?: any) => ipcRenderer.invoke('db-update-table-data', tableName, data, primaryKeyColumns, originalPkValues),
+  updateTableData: (tableName: string, data: any, primaryKeyColumns: string[], originalPkValues?: any, oldRowData?: any) => ipcRenderer.invoke('db-update-table-data', tableName, data, primaryKeyColumns, originalPkValues, oldRowData),
   getCredentials: () => ipcRenderer.invoke('db-get-credentials'),
   saveCredentials: (credentials: any) => ipcRenderer.invoke('db-save-credentials', credentials),
   deleteTableRows: (tableName: string, rowPks: any[], primaryKeyColumns: string[]) => ipcRenderer.invoke('db-delete-table-rows', tableName, rowPks, primaryKeyColumns),

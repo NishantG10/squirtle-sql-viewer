@@ -8,8 +8,22 @@ let pool: ConnectionPool;
 
 const CONFIG_FILE_NAME = 'user-preferences.json';
 
+const BLANK_REPLACEMENT_VALUE = 'NA';
+
 // Helper to get config path
 const getConfigPath = () => path.join(app.getPath('userData'), CONFIG_FILE_NAME);
+
+const isBlankValue = (value: any) => {
+  if (value === null || value === undefined) return true;
+  return typeof value === 'string' && value.trim() === '';
+};
+
+const normalizeBlankValue = (value: any) => {
+  if (isBlankValue(value)) {
+    return BLANK_REPLACEMENT_VALUE;
+  }
+  return value;
+};
 
 ipcMain.handle('db-get-credentials', async () => {
   try {
@@ -284,7 +298,7 @@ ipcMain.handle('db-get-primary-key', async (event, tableName) => {
   }
 });
 
-ipcMain.handle('db-update-table-data', async (event, tableName, row, primaryKeyColumns, originalPkValues) => {
+ipcMain.handle('db-update-table-data', async (event, tableName, row, primaryKeyColumns, originalPkValues, oldRowData) => {
   try {
     const request = pool.request();
     const setClauses: string[] = [];
@@ -299,6 +313,18 @@ ipcMain.handle('db-update-table-data', async (event, tableName, row, primaryKeyC
         realTableName = parts[1];
     }
     const safeTableName = `[${schemaName}].[${realTableName}]`;
+
+    const identityColumnsResult = await pool.request()
+      .input('tableName', realTableName)
+      .input('schema', schemaName)
+      .query(`
+        SELECT c.COLUMN_NAME
+        FROM INFORMATION_SCHEMA.COLUMNS c
+        WHERE c.TABLE_NAME = @tableName
+          AND c.TABLE_SCHEMA = @schema
+          AND COLUMNPROPERTY(OBJECT_ID(c.TABLE_SCHEMA + '.' + c.TABLE_NAME), c.COLUMN_NAME, 'IsIdentity') = 1
+      `);
+    const identityColumns = new Set(identityColumnsResult.recordset.map((r: any) => r.COLUMN_NAME));
 
     // If no primary key is provided or found, we can't safely update
     if (!primaryKeyColumns || primaryKeyColumns.length === 0) {
@@ -325,9 +351,13 @@ ipcMain.handle('db-update-table-data', async (event, tableName, row, primaryKeyC
       // We assume everything in 'row' (except internal fields) is a value to be set.
       // Even if it is a PK column, if it's in 'row', we update it.
       // We skip 'id' and '_originalPks'.
-      if (key !== 'id' && key !== '_originalPks') {
-        request.input(key, row[key]);
-        setClauses.push(`${key} = @${key}`);
+      if (key !== 'id' && key !== '_originalPks' && key !== '_isNew' && !identityColumns.has(key)) {
+        const normalizedValue = normalizeBlankValue(row[key]);
+        const hasChanged = oldRowData ? normalizedValue !== normalizeBlankValue(oldRowData[key]) : true;
+        if (hasChanged) {
+          request.input(key, normalizedValue);
+          setClauses.push(`${key} = @${key}`);
+        }
       }
     });
 
@@ -441,7 +471,7 @@ ipcMain.handle('db-insert-table-row', async (event, tableName, row, validColumnN
         if (columnsToInsert.length === 0) return { success: true }; 
 
         const valParams = columnsToInsert.map(col => `@${col}`);
-        columnsToInsert.forEach(col => request.input(col, row[col]));
+        columnsToInsert.forEach(col => request.input(col, normalizeBlankValue(row[col])));
 
         const query = `INSERT INTO ${safeTableName} (${columnsToInsert.join(', ')}) VALUES (${valParams.join(', ')})`;
         await request.query(query);
@@ -462,29 +492,41 @@ ipcMain.handle('db-bulk-insert', async (event, tableName, rows, columnNames) => 
         }
         const safeTableName = `[${schemaName}].[${realTableName}]`;
 
+        const identityColumnsResult = await pool.request()
+          .input('tableName', realTableName)
+          .input('schema', schemaName)
+          .query(`
+            SELECT c.COLUMN_NAME
+            FROM INFORMATION_SCHEMA.COLUMNS c
+            WHERE c.TABLE_NAME = @tableName
+              AND c.TABLE_SCHEMA = @schema
+              AND COLUMNPROPERTY(OBJECT_ID(c.TABLE_SCHEMA + '.' + c.TABLE_NAME), c.COLUMN_NAME, 'IsIdentity') = 1
+          `);
+        const identityColumns = new Set(identityColumnsResult.recordset.map((r: any) => r.COLUMN_NAME));
+
         let successCount = 0;
         let failCount = 0;
         const errors: string[] = [];
 
-        // Insert rows one by one (could be optimized with batch inserts)
+        // Insert rows one by one
         for (let i = 0; i < rows.length; i++) {
             try {
                 const request = pool.request();
                 const row = rows[i];
                 
-                // Filter to only valid columns
-                const columnsToInsert = columnNames.filter((col: string) => 
-                    row[col] !== undefined && row[col] !== null && row[col] !== ''
-                );
+                // Insert all non-identity columns and normalize blank values to NA.
+                const columnsToInsert = columnNames.filter((col: string) => !identityColumns.has(col));
 
                 if (columnsToInsert.length === 0) {
                     failCount++;
-                    errors.push(`Row ${i + 1}: No valid data`);
+                    errors.push(`Row ${i + 2}: No valid data`);
                     continue;
                 }
 
                 const valParams = columnsToInsert.map((col: string) => `@${col}`);
-                columnsToInsert.forEach((col: string) => request.input(col, row[col]));
+                columnsToInsert.forEach((col: string) => {
+                  request.input(col, normalizeBlankValue(row[col]));
+                });
 
                 const query = `INSERT INTO ${safeTableName} (${columnsToInsert.map((c: string) => `[${c}]`).join(', ')}) VALUES (${valParams.join(', ')})`;
                 await request.query(query);
@@ -499,7 +541,7 @@ ipcMain.handle('db-bulk-insert', async (event, tableName, rows, columnNames) => 
             success: true, 
             successCount, 
             failCount,
-            errors: errors.slice(0, 10) // Return first 10 errors only
+            errors // Return all errors
         };
     } catch (err: any) {
         return { success: false, error: err.message };

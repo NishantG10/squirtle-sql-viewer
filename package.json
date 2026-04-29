@@ -35,7 +35,7 @@
     "electron": "^40.9.1",
     "electron-builder": "^26.7.0",
     "typescript": "^5.9.3",
-    "vite": "^8.0.8"
+    "vite": "^7.3.2"
   },
   "dependencies": {
     "@emotion/react": "^11.14.0",

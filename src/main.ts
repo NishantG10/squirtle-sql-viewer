@@ -461,6 +461,18 @@ ipcMain.handle('db-insert-table-row', async (event, tableName, row, validColumnN
         }
         const safeTableName = `[${schemaName}].[${realTableName}]`;
 
+        const identityColumnsResult = await pool.request()
+          .input('tableName', realTableName)
+          .input('schema', schemaName)
+          .query(`
+            SELECT c.COLUMN_NAME
+            FROM INFORMATION_SCHEMA.COLUMNS c
+            WHERE c.TABLE_NAME = @tableName
+              AND c.TABLE_SCHEMA = @schema
+              AND COLUMNPROPERTY(OBJECT_ID(c.TABLE_SCHEMA + '.' + c.TABLE_NAME), c.COLUMN_NAME, 'IsIdentity') = 1
+          `);
+        const identityColumns = new Set(identityColumnsResult.recordset.map((r: any) => r.COLUMN_NAME));
+
         // If validColumnNames is provided, intersection. Else heuristic.
         let columnsToInsert = Object.keys(row).filter(key => key !== 'id' && key !== '_originalPks' && key !== '_isNew');
         
@@ -468,12 +480,14 @@ ipcMain.handle('db-insert-table-row', async (event, tableName, row, validColumnN
              columnsToInsert = columnsToInsert.filter(key => validColumnNames.includes(key));
         }
 
+        columnsToInsert = columnsToInsert.filter((key) => !identityColumns.has(key));
+
         if (columnsToInsert.length === 0) return { success: true }; 
 
         const valParams = columnsToInsert.map(col => `@${col}`);
         columnsToInsert.forEach(col => request.input(col, normalizeBlankValue(row[col])));
 
-        const query = `INSERT INTO ${safeTableName} (${columnsToInsert.join(', ')}) VALUES (${valParams.join(', ')})`;
+        const query = `INSERT INTO ${safeTableName} (${columnsToInsert.map((c) => `[${c}]`).join(', ')}) VALUES (${valParams.join(', ')})`;
         await request.query(query);
         return { success: true };
     } catch (err: any) {

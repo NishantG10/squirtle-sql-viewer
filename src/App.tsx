@@ -267,7 +267,9 @@ function App() {
         }
 
         // 2. Process Updates & Inserts
-        const validColumnNames = columns.map(c => c.field);
+        const validColumnNames = columns
+          .filter((c) => c.editable !== false)
+          .map((c) => c.field);
         const promises = Object.values(modifiedRows).map((entry) => {
           const row = entry.newRow;
           if ((row as any)._isNew) {

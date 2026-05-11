@@ -28,7 +28,7 @@ function AddRowDialog({ open, onClose, onAdd, columns }: AddRowDialogProps) {
     if (open) {
       const initialData: Record<string, any> = {};
       columns.forEach((col) => {
-        if (col.field !== 'id') {
+        if (col.field !== 'id' && col.editable !== false) {
           initialData[col.field] = '';
         }
       });

@@ -15,6 +15,7 @@ import UndoIcon from '@mui/icons-material/Undo';
 import FilterListIcon from '@mui/icons-material/FilterList';
 import CloseIcon from '@mui/icons-material/Close';
 import UploadFileIcon from '@mui/icons-material/UploadFile';
+import DownloadIcon from '@mui/icons-material/Download';
 
 interface FilterRule {
   id: string;
@@ -327,6 +328,29 @@ function App() {
     setModifiedRows((prev) => ({ ...prev, [tempId]: { newRow } }));
   };
 
+  const handleExport = async () => {
+    if (!selectedTable) return;
+    setLoading(true);
+    try {
+      const result = await window.electronAPI.exportTable(selectedTable, filters);
+      if (result.success) {
+        setSnackbarMessage(`Exported ${result.rowCount} rows to ${result.filePath}`);
+        setSnackbarSeverity('success');
+        setSnackbarOpen(true);
+      } else if (!result.canceled) {
+        setSnackbarMessage(`Export failed: ${result.error || 'Unknown error'}`);
+        setSnackbarSeverity('error');
+        setSnackbarOpen(true);
+      }
+    } catch (error: any) {
+      setSnackbarMessage(`Export failed: ${error.message}`);
+      setSnackbarSeverity('error');
+      setSnackbarOpen(true);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleImport = async (file: File) => {
     if (!selectedTable) {
       setSnackbarMessage('No table selected');
@@ -513,6 +537,14 @@ function App() {
                           onClick={() => setImportDialogOpen(true)}
                         >
                           Import
+                        </Button>
+                        <Button
+                          variant="outlined"
+                          color="success"
+                          startIcon={<DownloadIcon />}
+                          onClick={handleExport}
+                        >
+                          Export
                         </Button>
                         <Button
                             variant={showFilterPanel ? "contained" : "outlined"}

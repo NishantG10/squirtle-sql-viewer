@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import sql, { ConnectionPool } from 'mssql';
@@ -557,6 +557,69 @@ ipcMain.handle('db-bulk-insert', async (event, tableName, rows, columnNames) => 
             failCount,
             errors // Return all errors
         };
+    } catch (err: any) {
+        return { success: false, error: err.message };
+    }
+});
+
+ipcMain.handle('db-export-table', async (event, tableName, filters = []) => {
+    try {
+        let schemaName = 'dbo';
+        let realTableName = tableName;
+        if (tableName.includes('.')) {
+            const parts = tableName.split('.');
+            schemaName = parts[0];
+            realTableName = parts[1];
+        }
+        const safeTableName = `[${schemaName}].[${realTableName}]`;
+
+        // Build WHERE clause from filters (same logic as db-get-table-data)
+        let whereClause = '';
+        const request = pool.request();
+
+        if (filters && filters.length > 0) {
+            const conditions = filters.map((filter: any, index: number) => {
+                if (filter.field && filter.value) {
+                    const paramName = `filterValue${index}`;
+                    if (filter.operator === 'exact') {
+                        request.input(paramName, filter.value);
+                        return `CAST([${filter.field}] AS NVARCHAR(MAX)) = @${paramName}`;
+                    } else {
+                        request.input(paramName, `%${filter.value}%`);
+                        return `CAST([${filter.field}] AS NVARCHAR(MAX)) LIKE @${paramName}`;
+                    }
+                }
+                return null;
+            }).filter(Boolean);
+
+            if (conditions.length > 0) {
+                whereClause = 'WHERE ' + conditions.join(' AND ');
+            }
+        }
+
+        const result = await request.query(`SELECT * FROM ${safeTableName} ${whereClause}`);
+        const rows = result.recordset;
+
+        // Build Excel workbook
+        const XLSX = require('xlsx');
+        const worksheet = XLSX.utils.json_to_sheet(rows);
+        const workbook = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(workbook, worksheet, realTableName.substring(0, 31));
+
+        const { filePath, canceled } = await dialog.showSaveDialog({
+            title: 'Export to Excel',
+            defaultPath: `${realTableName}.xlsx`,
+            filters: [{ name: 'Excel Files', extensions: ['xlsx'] }],
+        });
+
+        if (canceled || !filePath) {
+            return { success: false, canceled: true };
+        }
+
+        const buffer: Buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+        await fs.writeFile(filePath, buffer);
+
+        return { success: true, filePath, rowCount: rows.length };
     } catch (err: any) {
         return { success: false, error: err.message };
     }

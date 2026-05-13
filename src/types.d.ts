@@ -39,6 +39,8 @@ declare global {
       deleteTableRows: (tableName: string, rowPks: any[], primaryKeyColumns: string[]) => Promise<any>;
       getColumns: (tableName: string) => Promise<any[]>;
       insertTableRow: (tableName: string, row: any, validColumns?: string[]) => Promise<any>;
+      bulkInsert: (tableName: string, rows: any[], columnNames: string[]) => Promise<any>;
+      exportTable: (tableName: string, filters?: any[]) => Promise<any>;
     };
   }
 }

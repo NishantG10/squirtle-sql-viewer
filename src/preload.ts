@@ -17,6 +17,7 @@ declare global {
       getColumns: (tableName: string) => Promise<any[]>;
       insertTableRow: (tableName: string, row: any, validColumns?: string[]) => Promise<any>;
       bulkInsert: (tableName: string, rows: any[], columnNames: string[]) => Promise<any>;
+      exportTable: (tableName: string, filters?: any[]) => Promise<any>;
     };
   }
 }
@@ -34,4 +35,5 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getColumns: (tableName: string) => ipcRenderer.invoke('db-get-columns', tableName),
   insertTableRow: (tableName: string, row: any, validColumns?: string[]) => ipcRenderer.invoke('db-insert-table-row', tableName, row, validColumns),
   bulkInsert: (tableName: string, rows: any[], columnNames: string[]) => ipcRenderer.invoke('db-bulk-insert', tableName, rows, columnNames),
+  exportTable: (tableName: string, filters?: any[]) => ipcRenderer.invoke('db-export-table', tableName, filters),
 });

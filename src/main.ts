@@ -2,6 +2,7 @@ import { app, BrowserWindow, ipcMain, dialog } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import sql, { ConnectionPool } from 'mssql';
+import * as XLSX from 'xlsx';
 import squirrel from 'electron-squirrel-startup';
 
 let pool: ConnectionPool;
@@ -600,8 +601,7 @@ ipcMain.handle('db-export-table', async (event, tableName, filters = []) => {
         const result = await request.query(`SELECT * FROM ${safeTableName} ${whereClause}`);
         const rows = result.recordset;
 
-        // Build Excel workbook using dynamic import
-        const XLSX = await import('xlsx');
+        // Build Excel workbook
         const worksheet = XLSX.utils.json_to_sheet(rows);
         const workbook = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(workbook, worksheet, realTableName.substring(0, 31));
